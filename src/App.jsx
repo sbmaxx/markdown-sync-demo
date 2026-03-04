@@ -5,16 +5,19 @@ const createMockDocument = () => {
   const segments = [];
   let markdown = '';
 
+  // Собираем единый markdown и одновременно сохраняем диапазоны каждого блока.
   const pushSegment = segment => {
     const start = markdown.length;
     const piece = segment.markdown;
     markdown += piece;
+    // end — включительный индекс последнего символа; bEnd+1 используется как exclusive boundary.
     const end = markdown.length - 1;
 
     const visibleText = segment.content || segment.label;
     let contentStart = start;
     let contentEnd = end + 1;
 
+    // Для интерактивных блоков стараемся привязаться к "видимой" части текста.
     if (visibleText) {
       const idx = piece.indexOf(visibleText);
       if (idx >= 0) {
@@ -108,6 +111,8 @@ const App = () => {
     return result;
   };
 
+  // Превращает DOM-позицию (node + offset) в плоский символьный offset внутри root,
+  // обходя все текстовые ноды в порядке документа через TreeWalker.
   const getOffsetInBlock = (root, targetNode, targetOffset) => {
     let currentOffset = 0;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
@@ -137,6 +142,7 @@ const App = () => {
   };
 
   useEffect(() => {
+    // Конвертируем DOM-выделение в диапазоны исходного markdown.
     const handleSelection = () => {
       const selection = window.getSelection();
 
@@ -160,6 +166,7 @@ const App = () => {
       const rects = [];
       const segments = [];
 
+      // Переводим координаты из viewport в локальные координаты скролл-контейнера.
       const toLocalRect = r => ({
         top: r.top - containerRect.top + scrollTop,
         left: r.left - containerRect.left + scrollLeft,
@@ -168,6 +175,7 @@ const App = () => {
       });
 
       blocks.forEach(block => {
+        // allowPartialContainment=true: блок попадает, даже если выделена только его часть.
         if (!selection.containsNode(block, true)) return;
 
         const bStart = parseInt(block.dataset.mStart, 10);
@@ -176,6 +184,7 @@ const App = () => {
 
         const blockRange = document.createRange();
         blockRange.selectNodeContents(block);
+        // Выделение начинается до блока и заканчивается после — блок покрыт целиком.
         const fullyCoversBlock =
           range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0 &&
           range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0;
@@ -184,10 +193,12 @@ const App = () => {
         let startEl = null;
         let endEl = null;
 
+        // Если блок покрыт целиком, берём весь markdown-диапазон блока.
         if (fullyCoversBlock) {
           segStart = bStart;
           segEnd = bEnd + 1;
         } else {
+          // Иначе вычисляем границы по фактическим позициям начала/конца внутри блока.
           if (block.contains(range.startContainer)) {
             startEl = findInnerAnnotated(range.startContainer, block);
             if (startEl) {
@@ -221,6 +232,7 @@ const App = () => {
 
         rects.push(toLocalRect(rectEl.getBoundingClientRect()));
 
+        // Clamp: DOM offset может выйти за границы блока из-за пробельных/служебных нод.
         segStart = Math.max(bStart, Math.min(segStart, bEnd + 1));
         segEnd = Math.max(segStart, Math.min(segEnd, bEnd + 1));
 
@@ -252,6 +264,7 @@ const App = () => {
     const elements = [];
     let cursor = 0;
 
+    // Рендерим markdown по блокам, чтобы подсветка совпадала с preview-сегментами.
     MOCK_DATA.forEach(node => {
       const blockStart = node.start;
       const blockEnd = node.end + 1;
@@ -266,6 +279,7 @@ const App = () => {
         );
       }
 
+      // Переводим глобальные markdown-диапазоны в локальные offset'ы внутри блока.
       const blockSegments = selectedSegments
         .filter(seg => seg.blockId === node.id)
         .map(seg => ({
@@ -346,6 +360,7 @@ const App = () => {
     const blockEl = event.currentTarget.closest('[data-m-block]');
     if (!blockEl || !containerRef.current) return;
 
+    // Клик по галерее считается выделением всего блока.
     const container = containerRef.current;
     const containerRect = container.getBoundingClientRect();
     const rect = blockEl.getBoundingClientRect();
@@ -366,6 +381,8 @@ const App = () => {
 
   return (
     <div className="app-container">
+      {/* data-m-* атрибуты связывают DOM-элементы с позициями в markdown,
+          позволяя handleSelection восстановить точный диапазон из выделения. */}
       <div className="preview-side" ref={containerRef}>
         {MOCK_DATA.map(node => (
           <div
