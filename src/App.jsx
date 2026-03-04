@@ -1,75 +1,124 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
-// Имитация данных из парсера Markdown
-const MOCK_DATA = [
-  {
+// Один общий markdown-документ + метаданные блоков с точными индексами
+const createMockDocument = () => {
+  const segments = [];
+  let markdown = '';
+
+  const pushSegment = segment => {
+    const start = markdown.length;
+    const piece = segment.markdown;
+    markdown += piece;
+    const end = markdown.length - 1;
+
+    let codeOffset = null;
+    let labelOffset = null;
+
+    if (segment.type === 'code' && segment.content) {
+      const idx = piece.indexOf(segment.content);
+      codeOffset = idx >= 0 ? idx : null;
+    }
+
+    if (segment.type === 'gallery' && segment.label) {
+      const idx = piece.indexOf(segment.label);
+      labelOffset = idx >= 0 ? idx : null;
+    }
+
+    segments.push({
+      id: segment.id,
+      type: segment.type,
+      content: segment.content,
+      label: segment.label,
+      start,
+      end,
+      codeOffset,
+      labelOffset
+    });
+  };
+
+  // Текст до галереи
+  pushSegment({
     id: '1',
     type: 'text',
     content: 'Выделите часть этого предложения, чтобы увидеть точность до символа.',
-    start: 0,
-    end: 70
-  },
-  {
-    id: '2',
-    type: 'gallery',
-    start: 71,
-    end: 200,
-    label: 'Галерея (Блок Markdown)'
-  },
-  {
-    id: '3',
-    type: 'text',
-    content: 'А теперь выделите текст после галереи. Обратите внимание на индексы!',
-    start: 201,
-    end: 280
-  }
-];
-
-// Строим "исходный" markdown так, чтобы индексы из MOCK_DATA
-// реально соответствовали символам в этой строке
-const buildMarkdownFromMockData = () => {
-  const maxIndex = MOCK_DATA.reduce((max, node) => Math.max(max, node.end), 0);
-  const chars = new Array(maxIndex + 1).fill(' ');
-
-  MOCK_DATA.forEach(node => {
-    let snippet = '';
-
-    if (node.type === 'text') {
-      snippet = node.content;
-    } else if (node.type === 'gallery') {
-      // Для галереи явно отображаем комментарии начала/конца, два изображения и подпись
-      const blockLength = node.end - node.start + 1;
-      let baseSnippet =
-        `<!-- gallery start -->\n` +
-        `![img1](./image-1)\n` +
-        `![img2](./image-2)\n` +
-        `${node.label}\n` +
-        `<!-- gallery end -->`;
-
-      if (baseSnippet.length < blockLength) {
-        baseSnippet = baseSnippet.padEnd(blockLength, ' ');
-      }
-
-      snippet = baseSnippet.slice(0, blockLength);
-    }
-
-    for (let i = 0; i < snippet.length; i++) {
-      const pos = node.start + i;
-      if (pos > node.end) break;
-      chars[pos] = snippet[i];
-    }
+    markdown:
+      'Выделите часть этого предложения, чтобы увидеть точность до символа.\n\n'
   });
 
-  return chars.join('');
+  // Галерея
+  pushSegment({
+    id: '2',
+    type: 'gallery',
+    label: 'Галерея (Блок Markdown)',
+    markdown:
+      '<!-- gallery start -->\n' +
+      '![img1](./image-1)\n' +
+      '![img2](./image-2)\n' +
+      'Галерея (Блок Markdown)\n' +
+      '<!-- gallery end -->\n\n'
+  });
+
+  // Пример кода как дополнительный блок
+  pushSegment({
+    id: '3',
+    type: 'code',
+    label: 'Пример кода сопоставления',
+    content:
+      'function mapSelectionToMarkdown(range) {\n' +
+      '  const start = toMarkdownIndex(range.startContainer, range.startOffset);\n' +
+      '  const end = toMarkdownIndex(range.endContainer, range.endOffset);\n' +
+      '  return { start, end };\n' +
+      '}',
+    markdown:
+      '```js\n' +
+      'function mapSelectionToMarkdown(range) {\n' +
+      '  const start = toMarkdownIndex(range.startContainer, range.startOffset);\n' +
+      '  const end = toMarkdownIndex(range.endContainer, range.endOffset);\n' +
+      '  return { start, end };\n' +
+      '}\n' +
+      '```\n\n'
+  });
+
+  // Текст после галереи и примера кода
+  pushSegment({
+    id: '4',
+    type: 'text',
+    content: 'А теперь выделите текст после галереи. Обратите внимание на индексы!',
+    markdown:
+      'А теперь выделите текст после галереи.\n' +
+      'Обратите внимание на индексы!'
+  });
+
+  return { markdown, segments };
 };
 
-const MOCK_MARKDOWN = buildMarkdownFromMockData();
+const { markdown: MOCK_MARKDOWN, segments: MOCK_DATA } = createMockDocument();
 
 const App = () => {
   const [selectedRange, setSelectedRange] = useState(null);
   const [overlayRects, setOverlayRects] = useState([]);
+  const [selectedSegments, setSelectedSegments] = useState([]);
+  const [hoveredBlockId, setHoveredBlockId] = useState(null);
   const containerRef = useRef(null);
+
+  const renderWithNewlines = (text, keyPrefix) => {
+    const parts = text.split('\n');
+    const result = [];
+
+    parts.forEach((part, idx) => {
+      if (idx > 0) {
+        result.push(<br key={`${keyPrefix}-br-${idx}`} />);
+      }
+      if (part.length > 0) {
+        result.push(
+          <span key={`${keyPrefix}-seg-${idx}`}>{part}</span>
+        );
+      }
+    });
+
+    return result;
+  };
 
   // Функция подсчета символов внутри DOM-дерева блока до конкретной позиции
   const getOffsetInBlock = (root, targetNode, targetOffset) => {
@@ -91,6 +140,10 @@ const App = () => {
       const selection = window.getSelection();
 
       if (!selection || !containerRef.current) {
+        setOverlayRects([]);
+        setSelectedRange(null);
+        setSelectedSegments([]);
+        setHoveredBlockId(null);
         return;
       }
 
@@ -100,58 +153,135 @@ const App = () => {
 
       // Игнорируем выделения вне превью, чтобы подсветка не "прыгала"
       if (!inPreview) {
+        setOverlayRects([]);
+        setSelectedRange(null);
+        setSelectedSegments([]);
+        setHoveredBlockId(null);
         return;
       }
 
       if (selection.isCollapsed) {
         setOverlayRects([]);
         setSelectedRange(null);
+        setSelectedSegments([]);
+        setHoveredBlockId(null);
         return;
       }
 
       const range = selection.getRangeAt(0);
-      const blocks = containerRef.current.querySelectorAll('[data-m-start]');
+      const container = containerRef.current;
+      const containerRect = container.getBoundingClientRect();
+      const scrollTop = container.scrollTop;
+      const scrollLeft = container.scrollLeft;
+      const blocks = container.querySelectorAll('[data-m-start]');
 
       let minStart = null;
       let maxEnd = null;
       const rects = [];
+      const segments = [];
+
+      const toLocalRect = domRect => ({
+        top: domRect.top - containerRect.top + scrollTop,
+        left: domRect.left - containerRect.left + scrollLeft,
+        width: domRect.width,
+        height: domRect.height
+      });
 
       blocks.forEach(block => {
         // Проверяем, попадает ли блок в выделение (полностью или частично)
         if (selection.containsNode(block, true)) {
-          const bStart = parseInt(block.dataset.mStart);
-          const bEnd = parseInt(block.dataset.mEnd);
+          const bStart = parseInt(block.dataset.mStart, 10);
+          const bEnd = parseInt(block.dataset.mEnd, 10);
+          const blockId = block.dataset.mId;
+          const codeOffset = parseInt(block.dataset.mCodeOffset || '0', 10);
+          const meta = MOCK_DATA.find(node => node.id === blockId);
 
-          rects.push(block.getBoundingClientRect());
+          let segStart;
+          let segEnd;
 
-          // Определяем, покрывает ли выделение блок целиком
-          const blockRange = document.createRange();
-          blockRange.selectNodeContents(block);
-          const fullyCoversBlock =
-            range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0 &&
-            range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0;
+          if (meta && meta.type === 'gallery') {
+            const labelOffset = meta.labelOffset ?? 0;
+            const labelElement = block.querySelector('.gallery-label');
 
-          // Расчет точного начала (если выделение началось в этом блоке)
-          if (!fullyCoversBlock && block.contains(range.startContainer)) {
-            minStart = bStart + getOffsetInBlock(block, range.startContainer, range.startOffset);
-          } else if (minStart === null || bStart < minStart) {
-            // Если блок полностью или частично внутри выделения,
-            // но старт был раньше – берём начало блока
-            minStart = bStart;
+            const startInLabel =
+              labelElement && labelElement.contains(range.startContainer)
+                ? getOffsetInBlock(labelElement, range.startContainer, range.startOffset)
+                : null;
+
+            const endInLabel =
+              labelElement && labelElement.contains(range.endContainer)
+                ? getOffsetInBlock(labelElement, range.endContainer, range.endOffset)
+                : null;
+
+            // Если выделение целиком внутри подписи — маппим точный поддиапазон подписи
+            if (startInLabel !== null && endInLabel !== null) {
+              // Рамку рисуем только вокруг подписи
+              rects.push(toLocalRect(labelElement.getBoundingClientRect()));
+
+              segStart = bStart + labelOffset + startInLabel;
+              segEnd = bStart + labelOffset + endInLabel;
+            } else {
+              // Иначе считаем галерею атомарным блоком
+              rects.push(toLocalRect(block.getBoundingClientRect()));
+              segStart = bStart;
+              segEnd = bEnd + 1;
+            }
+          } else {
+            rects.push(toLocalRect(block.getBoundingClientRect()));
+            // Определяем, покрывает ли выделение блок целиком
+            const blockRange = document.createRange();
+            blockRange.selectNodeContents(block);
+            const fullyCoversBlock =
+              range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0 &&
+              range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0;
+
+            if (fullyCoversBlock) {
+              segStart = bStart;
+              segEnd = bEnd + 1;
+            } else {
+            // Частичное пересечение — считаем точные границы внутри блока
+            if (block.contains(range.startContainer)) {
+              segStart =
+                bStart +
+                codeOffset +
+                getOffsetInBlock(block, range.startContainer, range.startOffset);
+            } else {
+              segStart = bStart + codeOffset;
+            }
+
+            if (block.contains(range.endContainer)) {
+              segEnd =
+                bStart +
+                codeOffset +
+                getOffsetInBlock(block, range.endContainer, range.endOffset);
+            } else {
+              segEnd = bEnd + 1;
+            }
+          }
           }
 
-          // Расчет точного конца (если выделение закончилось в этом блоке)
-          if (!fullyCoversBlock && block.contains(range.endContainer)) {
-            maxEnd = bStart + getOffsetInBlock(block, range.endContainer, range.endOffset);
-          } else if (maxEnd === null || bEnd > maxEnd) {
-            maxEnd = bEnd;
-          }
+          segStart = Math.max(bStart, Math.min(segStart, bEnd + 1));
+          segEnd = Math.max(segStart, Math.min(segEnd, bEnd + 1));
+
+          segments.push({
+            start: segStart,
+            end: segEnd,
+            blockId
+          });
+
+          minStart = minStart === null ? segStart : Math.min(minStart, segStart);
+          maxEnd = maxEnd === null ? segEnd : Math.max(maxEnd, segEnd);
         }
       });
 
-      if (rects.length > 0) {
+      if (rects.length > 0 && segments.length > 0) {
         setOverlayRects(rects);
+        setSelectedSegments(segments);
         setSelectedRange({ start: minStart, end: maxEnd });
+      } else {
+        setOverlayRects([]);
+        setSelectedRange(null);
+        setSelectedSegments([]);
       }
     };
 
@@ -160,115 +290,160 @@ const App = () => {
   }, []);
 
   const renderHighlightedMarkdown = () => {
-    if (!selectedRange) {
+    if (!selectedRange && !selectedSegments.length && !hoveredBlockId) {
       return MOCK_MARKDOWN;
     }
 
-    const { start, end } = selectedRange;
-    const safeStart = Math.max(0, Math.min(start, MOCK_MARKDOWN.length));
-    const safeEnd = Math.max(safeStart, Math.min(end, MOCK_MARKDOWN.length));
+    const elements = [];
+    let cursor = 0;
 
-    // Находим блок, к которому относится выделение (по центру диапазона)
-    const middle = (safeStart + safeEnd) / 2;
-    const activeBlock = MOCK_DATA.find(node => middle >= node.start && middle <= node.end);
+    MOCK_DATA.forEach(node => {
+      const blockStart = node.start;
+      const blockEnd = node.end + 1;
+      const blockText = MOCK_MARKDOWN.slice(blockStart, blockEnd);
 
-    if (!activeBlock) {
-      return (
-        <>
-          <span>{MOCK_MARKDOWN.slice(0, safeStart)}</span>
-          <span className="md-highlight">
-            {MOCK_MARKDOWN.slice(safeStart, safeEnd)}
+      if (cursor < blockStart) {
+        const gapText = MOCK_MARKDOWN.slice(cursor, blockStart);
+        elements.push(
+          <span key={`gap-${cursor}-${blockStart}`}>
+            {renderWithNewlines(gapText, `gap-${cursor}-${blockStart}`)}
           </span>
-          <span>{MOCK_MARKDOWN.slice(safeEnd)}</span>
-        </>
+        );
+      }
+
+      const blockSegments = selectedSegments
+        .filter(seg => seg.blockId === node.id)
+        .map(seg => ({
+          start: Math.max(0, seg.start - blockStart),
+          end: Math.max(0, Math.min(blockText.length, seg.end - blockStart))
+        }))
+        .filter(seg => seg.end > seg.start)
+        .sort((a, b) => a.start - b.start);
+
+      if (!blockSegments.length && hoveredBlockId !== node.id) {
+        elements.push(
+          <span key={`block-${node.id}`}>
+            {renderWithNewlines(blockText, `block-${node.id}`)}
+          </span>
+        );
+      } else {
+        const inner = [];
+        let idx = 0;
+
+        blockSegments.forEach((seg, i) => {
+          if (seg.start > idx) {
+            const plain = blockText.slice(idx, seg.start);
+            inner.push(
+              <span key={`b-${node.id}-plain-${i}`}>
+                {renderWithNewlines(plain, `b-${node.id}-plain-${i}`)}
+              </span>
+            );
+          }
+          inner.push(
+            <span
+              key={`b-${node.id}-hi-${i}`}
+              className="md-highlight"
+            >
+              {renderWithNewlines(
+                blockText.slice(seg.start, seg.end),
+                `b-${node.id}-hi-${i}`
+              )}
+            </span>
+          );
+          idx = seg.end;
+        });
+
+        if (idx < blockText.length) {
+          const tail = blockText.slice(idx);
+          inner.push(
+            <span key={`b-${node.id}-tail`}>
+              {renderWithNewlines(tail, `b-${node.id}-tail`)}
+            </span>
+          );
+        }
+
+        elements.push(
+          <span
+            key={`block-${node.id}`}
+            className={hoveredBlockId === node.id ? 'md-block-frame' : undefined}
+          >
+            {inner}
+          </span>
+        );
+      }
+
+      cursor = blockEnd;
+    });
+
+    if (cursor < MOCK_MARKDOWN.length) {
+      const tail = MOCK_MARKDOWN.slice(cursor);
+      elements.push(
+        <span key={`tail-${cursor}`}>
+          {renderWithNewlines(tail, `tail-${cursor}`)}
+        </span>
       );
     }
 
-    const blockStart = activeBlock.start;
-    const blockEnd = activeBlock.end;
-
-    const beforeBlock = MOCK_MARKDOWN.slice(0, blockStart);
-    const blockText = MOCK_MARKDOWN.slice(blockStart, blockEnd);
-    const afterBlock = MOCK_MARKDOWN.slice(blockEnd);
-
-    let beforeInner;
-    let inner;
-    let afterInner;
-
-    if (activeBlock.type === 'gallery') {
-      // Для галереи считаем, что "сам текст" — это её label
-      const label = activeBlock.label;
-      const labelIndex = blockText.indexOf(label);
-
-      if (labelIndex !== -1) {
-        beforeInner = blockText.slice(0, labelIndex);
-        inner = blockText.slice(labelIndex, labelIndex + label.length);
-        afterInner = blockText.slice(labelIndex + label.length);
-      } else {
-        // Фолбэк: подсвечиваем весь блок
-        beforeInner = '';
-        inner = blockText;
-        afterInner = '';
-      }
-    } else {
-      const innerStart = Math.max(0, safeStart - blockStart);
-      const innerEnd = Math.max(innerStart, Math.min(blockText.length, safeEnd - blockStart));
-
-      beforeInner = blockText.slice(0, innerStart);
-      inner = blockText.slice(innerStart, innerEnd);
-      afterInner = blockText.slice(innerEnd);
-    }
-
-    return (
-      <>
-        <span>{beforeBlock}</span>
-        <span className="md-block-frame">
-          <span>{beforeInner}</span>
-          <span className="md-highlight">{inner}</span>
-          <span>{afterInner}</span>
-        </span>
-        <span>{afterBlock}</span>
-      </>
-    );
+    return elements;
   };
 
-  const handleGalleryDoubleClick = event => {
-    // Не даём браузеру "подхватывать" текст под галереей
+  const handleGalleryClick = (event, node) => {
     event.preventDefault();
     event.stopPropagation();
 
-    const block = event.currentTarget.closest('[data-m-start]');
-    if (!block) return;
+    const blockEl = event.currentTarget.closest('[data-m-start]');
+    if (!blockEl) return;
 
-    const range = document.createRange();
-    range.selectNodeContents(block);
+    const bStart = node.start;
+    const bEnd = node.end + 1;
 
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
+    const rect = blockEl.getBoundingClientRect();
+    setOverlayRects([rect]);
+    setSelectedRange({ start: bStart, end: bEnd });
+    setSelectedSegments([
+      {
+        start: bStart,
+        end: bEnd,
+        blockId: node.id
+      }
+    ]);
   };
 
   return (
     <div className="app-container">
       <div className="preview-side" ref={containerRef}>
-        <h1>Markdown Renderer</h1>
-
         {MOCK_DATA.map(node => (
           <div
             key={node.id}
             data-m-start={node.start}
             data-m-end={node.end}
-            data-m-type={node.type}
+            data-m-code-offset={node.codeOffset ?? ''}
             className={`block ${node.type}`}
+            data-m-id={node.id}
+            onMouseEnter={() => setHoveredBlockId(node.id)}
+            onMouseLeave={() => setHoveredBlockId(null)}
           >
             {node.type === 'text' && <p>{node.content}</p>}
 
             {node.type === 'gallery' && (
-              <div className="gallery-mock" onDoubleClick={handleGalleryDoubleClick}>
+              <div
+                className="gallery-mock"
+                onClick={event => handleGalleryClick(event, node)}
+              >
                 <div className="img-placeholder">IMG 1</div>
                 <div className="img-placeholder">IMG 2</div>
-                <div style={{ color: '#666' }}>{node.label}</div>
+                <div className="gallery-label" style={{ color: '#666' }}>
+                  {node.label}
+                </div>
               </div>
+            )}
+
+            {node.type === 'code' && (
+              <pre className="code-mock">
+                <code>
+                  {node.content}
+                </code>
+              </pre>
             )}
           </div>
         ))}
@@ -279,8 +454,8 @@ const App = () => {
             key={i}
             className="selection-frame"
             style={{
-              top: r.top + window.scrollY,
-              left: r.left + window.scrollX,
+              top: r.top,
+              left: r.left,
               width: r.width,
               height: r.height
             }}
@@ -289,33 +464,9 @@ const App = () => {
       </div>
 
       <div className="info-side">
-        <h2>Markdown Inspector</h2>
-
-        <div className="code-card">
-          <div className="code-card-header">
-            <span className="code-card-title">Исходный markdown</span>
-            {selectedRange && (
-              <span className="code-card-subtitle">подсвечен связанный фрагмент</span>
-            )}
-          </div>
-          <pre className="markdown-source">
-            {renderHighlightedMarkdown()}
-          </pre>
-        </div>
-
-        {selectedRange ? (
-          <div className="info-card">
-            <strong>Диапазон в markdown:</strong>
-            <span className="range-display">
-              chars: {selectedRange.start} — {selectedRange.end}
-            </span>
-            <p className="info-caption">
-              Выделение на превью слева преобразовано в позицию внутри исходного .md файла.
-            </p>
-          </div>
-        ) : (
-          <div className="hint">Выделите фрагмент текста или компонент слева</div>
-        )}
+        <pre className="markdown-source">
+          {renderHighlightedMarkdown()}
+        </pre>
       </div>
     </div>
   );
