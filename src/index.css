@@ -1,0 +1,19 @@
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  color-scheme: light; /* Принудительно светлая тема */
+  background-color: #ffffff;
+}
+
+body {
+  margin: 0;
+  display: block;
+  min-width: 320px;
+  min-height: 100vh;
+  color: #213547;
+}
+
+#root {
+  max-width: none;
+  margin: 0;
+  text-align: left;
+}
