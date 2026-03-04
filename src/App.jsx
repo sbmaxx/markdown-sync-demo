@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
-// Один общий markdown-документ + метаданные блоков с точными индексами
 const createMockDocument = () => {
   const segments = [];
   let markdown = '';
@@ -12,17 +11,16 @@ const createMockDocument = () => {
     markdown += piece;
     const end = markdown.length - 1;
 
-    let codeOffset = null;
-    let labelOffset = null;
+    const visibleText = segment.content || segment.label;
+    let contentStart = start;
+    let contentEnd = end + 1;
 
-    if (segment.type === 'code' && segment.content) {
-      const idx = piece.indexOf(segment.content);
-      codeOffset = idx >= 0 ? idx : null;
-    }
-
-    if (segment.type === 'gallery' && segment.label) {
-      const idx = piece.indexOf(segment.label);
-      labelOffset = idx >= 0 ? idx : null;
+    if (visibleText) {
+      const idx = piece.indexOf(visibleText);
+      if (idx >= 0) {
+        contentStart = start + idx;
+        contentEnd = contentStart + visibleText.length;
+      }
     }
 
     segments.push({
@@ -32,12 +30,11 @@ const createMockDocument = () => {
       label: segment.label,
       start,
       end,
-      codeOffset,
-      labelOffset
+      contentStart,
+      contentEnd
     });
   };
 
-  // Текст до галереи
   pushSegment({
     id: '1',
     type: 'text',
@@ -46,7 +43,6 @@ const createMockDocument = () => {
       'Выделите часть этого предложения, чтобы увидеть точность до символа.\n\n'
   });
 
-  // Галерея
   pushSegment({
     id: '2',
     type: 'gallery',
@@ -59,7 +55,6 @@ const createMockDocument = () => {
       '<!-- gallery end -->\n\n'
   });
 
-  // Пример кода как дополнительный блок
   pushSegment({
     id: '3',
     type: 'code',
@@ -80,7 +75,6 @@ const createMockDocument = () => {
       '```\n\n'
   });
 
-  // Текст после галереи и примера кода
   pushSegment({
     id: '4',
     type: 'text',
@@ -105,173 +99,134 @@ const App = () => {
   const renderWithNewlines = (text, keyPrefix) => {
     const parts = text.split('\n');
     const result = [];
-
     parts.forEach((part, idx) => {
-      if (idx > 0) {
-        result.push(<br key={`${keyPrefix}-br-${idx}`} />);
-      }
+      if (idx > 0) result.push(<br key={`${keyPrefix}-br-${idx}`} />);
       if (part.length > 0) {
-        result.push(
-          <span key={`${keyPrefix}-seg-${idx}`}>{part}</span>
-        );
+        result.push(<span key={`${keyPrefix}-seg-${idx}`}>{part}</span>);
       }
     });
-
     return result;
   };
 
-  // Функция подсчета символов внутри DOM-дерева блока до конкретной позиции
   const getOffsetInBlock = (root, targetNode, targetOffset) => {
     let currentOffset = 0;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
-
     while (walker.nextNode()) {
       const node = walker.currentNode;
-      if (node === targetNode) {
-        return currentOffset + targetOffset;
-      }
+      if (node === targetNode) return currentOffset + targetOffset;
       currentOffset += node.textContent.length;
     }
     return 0;
+  };
+
+  // Ближайший предок (или сам элемент) с data-m-start, но НЕ сам блок
+  const findInnerAnnotated = (node, block) => {
+    let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    while (el && block.contains(el) && el !== block) {
+      if (el.dataset.mStart !== undefined && el.dataset.mStart !== '') return el;
+      el = el.parentElement;
+    }
+    return null;
+  };
+
+  const clearState = () => {
+    setOverlayRects([]);
+    setSelectedRange(null);
+    setSelectedSegments([]);
+    setHoveredBlockId(null);
   };
 
   useEffect(() => {
     const handleSelection = () => {
       const selection = window.getSelection();
 
-      if (!selection || !containerRef.current) {
-        setOverlayRects([]);
-        setSelectedRange(null);
-        setSelectedSegments([]);
-        setHoveredBlockId(null);
-        return;
-      }
+      if (!selection || !containerRef.current) { clearState(); return; }
 
       const inPreview =
         containerRef.current.contains(selection.anchorNode) ||
         containerRef.current.contains(selection.focusNode);
 
-      // Игнорируем выделения вне превью, чтобы подсветка не "прыгала"
-      if (!inPreview) {
-        setOverlayRects([]);
-        setSelectedRange(null);
-        setSelectedSegments([]);
-        setHoveredBlockId(null);
-        return;
-      }
-
-      if (selection.isCollapsed) {
-        setOverlayRects([]);
-        setSelectedRange(null);
-        setSelectedSegments([]);
-        setHoveredBlockId(null);
-        return;
-      }
+      if (!inPreview) { clearState(); return; }
+      if (selection.isCollapsed) { clearState(); return; }
 
       const range = selection.getRangeAt(0);
       const container = containerRef.current;
       const containerRect = container.getBoundingClientRect();
-      const scrollTop = container.scrollTop;
-      const scrollLeft = container.scrollLeft;
-      const blocks = container.querySelectorAll('[data-m-start]');
+      const { scrollTop, scrollLeft } = container;
+      const blocks = container.querySelectorAll('[data-m-block]');
 
       let minStart = null;
       let maxEnd = null;
       const rects = [];
       const segments = [];
 
-      const toLocalRect = domRect => ({
-        top: domRect.top - containerRect.top + scrollTop,
-        left: domRect.left - containerRect.left + scrollLeft,
-        width: domRect.width,
-        height: domRect.height
+      const toLocalRect = r => ({
+        top: r.top - containerRect.top + scrollTop,
+        left: r.left - containerRect.left + scrollLeft,
+        width: r.width,
+        height: r.height
       });
 
       blocks.forEach(block => {
-        // Проверяем, попадает ли блок в выделение (полностью или частично)
-        if (selection.containsNode(block, true)) {
-          const bStart = parseInt(block.dataset.mStart, 10);
-          const bEnd = parseInt(block.dataset.mEnd, 10);
-          const blockId = block.dataset.mId;
-          const codeOffset = parseInt(block.dataset.mCodeOffset || '0', 10);
-          const meta = MOCK_DATA.find(node => node.id === blockId);
+        if (!selection.containsNode(block, true)) return;
 
-          let segStart;
-          let segEnd;
+        const bStart = parseInt(block.dataset.mStart, 10);
+        const bEnd = parseInt(block.dataset.mEnd, 10);
+        const blockId = block.dataset.mId;
 
-          if (meta && meta.type === 'gallery') {
-            const labelOffset = meta.labelOffset ?? 0;
-            const labelElement = block.querySelector('.gallery-label');
+        const blockRange = document.createRange();
+        blockRange.selectNodeContents(block);
+        const fullyCoversBlock =
+          range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0 &&
+          range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0;
 
-            const startInLabel =
-              labelElement && labelElement.contains(range.startContainer)
-                ? getOffsetInBlock(labelElement, range.startContainer, range.startOffset)
-                : null;
+        let segStart, segEnd;
+        let startEl = null;
+        let endEl = null;
 
-            const endInLabel =
-              labelElement && labelElement.contains(range.endContainer)
-                ? getOffsetInBlock(labelElement, range.endContainer, range.endOffset)
-                : null;
-
-            // Если выделение целиком внутри подписи — маппим точный поддиапазон подписи
-            if (startInLabel !== null && endInLabel !== null) {
-              // Рамку рисуем только вокруг подписи
-              rects.push(toLocalRect(labelElement.getBoundingClientRect()));
-
-              segStart = bStart + labelOffset + startInLabel;
-              segEnd = bStart + labelOffset + endInLabel;
+        if (fullyCoversBlock) {
+          segStart = bStart;
+          segEnd = bEnd + 1;
+        } else {
+          if (block.contains(range.startContainer)) {
+            startEl = findInnerAnnotated(range.startContainer, block);
+            if (startEl) {
+              segStart = parseInt(startEl.dataset.mStart, 10) +
+                getOffsetInBlock(startEl, range.startContainer, range.startOffset);
             } else {
-              // Иначе считаем галерею атомарным блоком
-              rects.push(toLocalRect(block.getBoundingClientRect()));
               segStart = bStart;
+            }
+          } else {
+            segStart = bStart;
+          }
+
+          if (block.contains(range.endContainer)) {
+            endEl = findInnerAnnotated(range.endContainer, block);
+            if (endEl) {
+              segEnd = parseInt(endEl.dataset.mStart, 10) +
+                getOffsetInBlock(endEl, range.endContainer, range.endOffset);
+            } else {
               segEnd = bEnd + 1;
             }
           } else {
-            rects.push(toLocalRect(block.getBoundingClientRect()));
-            // Определяем, покрывает ли выделение блок целиком
-            const blockRange = document.createRange();
-            blockRange.selectNodeContents(block);
-            const fullyCoversBlock =
-              range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0 &&
-              range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0;
-
-            if (fullyCoversBlock) {
-              segStart = bStart;
-              segEnd = bEnd + 1;
-            } else {
-            // Частичное пересечение — считаем точные границы внутри блока
-            if (block.contains(range.startContainer)) {
-              segStart =
-                bStart +
-                codeOffset +
-                getOffsetInBlock(block, range.startContainer, range.startOffset);
-            } else {
-              segStart = bStart + codeOffset;
-            }
-
-            if (block.contains(range.endContainer)) {
-              segEnd =
-                bStart +
-                codeOffset +
-                getOffsetInBlock(block, range.endContainer, range.endOffset);
-            } else {
-              segEnd = bEnd + 1;
-            }
+            segEnd = bEnd + 1;
           }
-          }
-
-          segStart = Math.max(bStart, Math.min(segStart, bEnd + 1));
-          segEnd = Math.max(segStart, Math.min(segEnd, bEnd + 1));
-
-          segments.push({
-            start: segStart,
-            end: segEnd,
-            blockId
-          });
-
-          minStart = minStart === null ? segStart : Math.min(minStart, segStart);
-          maxEnd = maxEnd === null ? segEnd : Math.max(maxEnd, segEnd);
         }
+
+        // Рамку рисуем вокруг внутреннего элемента, если оба края в нём
+        const rectEl =
+          startEl && endEl && startEl === endEl
+            ? startEl
+            : block;
+
+        rects.push(toLocalRect(rectEl.getBoundingClientRect()));
+
+        segStart = Math.max(bStart, Math.min(segStart, bEnd + 1));
+        segEnd = Math.max(segStart, Math.min(segEnd, bEnd + 1));
+
+        segments.push({ start: segStart, end: segEnd, blockId });
+        minStart = minStart === null ? segStart : Math.min(minStart, segStart);
+        maxEnd = maxEnd === null ? segEnd : Math.max(maxEnd, segEnd);
       });
 
       if (rects.length > 0 && segments.length > 0) {
@@ -340,10 +295,7 @@ const App = () => {
             );
           }
           inner.push(
-            <span
-              key={`b-${node.id}-hi-${i}`}
-              className="md-highlight"
-            >
+            <span key={`b-${node.id}-hi-${i}`} className="md-highlight">
               {renderWithNewlines(
                 blockText.slice(seg.start, seg.end),
                 `b-${node.id}-hi-${i}`
@@ -391,22 +343,25 @@ const App = () => {
     event.preventDefault();
     event.stopPropagation();
 
-    const blockEl = event.currentTarget.closest('[data-m-start]');
-    if (!blockEl) return;
+    const blockEl = event.currentTarget.closest('[data-m-block]');
+    if (!blockEl || !containerRef.current) return;
 
-    const bStart = node.start;
-    const bEnd = node.end + 1;
-
+    const container = containerRef.current;
+    const containerRect = container.getBoundingClientRect();
     const rect = blockEl.getBoundingClientRect();
-    setOverlayRects([rect]);
-    setSelectedRange({ start: bStart, end: bEnd });
-    setSelectedSegments([
-      {
-        start: bStart,
-        end: bEnd,
-        blockId: node.id
-      }
-    ]);
+
+    setOverlayRects([{
+      top: rect.top - containerRect.top + container.scrollTop,
+      left: rect.left - containerRect.left + container.scrollLeft,
+      width: rect.width,
+      height: rect.height
+    }]);
+    setSelectedRange({ start: node.start, end: node.end + 1 });
+    setSelectedSegments([{
+      start: node.start,
+      end: node.end + 1,
+      blockId: node.id
+    }]);
   };
 
   return (
@@ -415,15 +370,19 @@ const App = () => {
         {MOCK_DATA.map(node => (
           <div
             key={node.id}
+            data-m-block=""
             data-m-start={node.start}
             data-m-end={node.end}
-            data-m-code-offset={node.codeOffset ?? ''}
-            className={`block ${node.type}`}
             data-m-id={node.id}
+            className={`block ${node.type}`}
             onMouseEnter={() => setHoveredBlockId(node.id)}
             onMouseLeave={() => setHoveredBlockId(null)}
           >
-            {node.type === 'text' && <p>{node.content}</p>}
+            {node.type === 'text' && (
+              <p data-m-start={node.contentStart} data-m-end={node.contentEnd}>
+                {node.content}
+              </p>
+            )}
 
             {node.type === 'gallery' && (
               <div
@@ -432,7 +391,12 @@ const App = () => {
               >
                 <div className="img-placeholder">IMG 1</div>
                 <div className="img-placeholder">IMG 2</div>
-                <div className="gallery-label" style={{ color: '#666' }}>
+                <div
+                  className="gallery-label"
+                  data-m-start={node.contentStart}
+                  data-m-end={node.contentEnd}
+                  style={{ color: '#657b83' }}
+                >
                   {node.label}
                 </div>
               </div>
@@ -440,7 +404,7 @@ const App = () => {
 
             {node.type === 'code' && (
               <pre className="code-mock">
-                <code>
+                <code data-m-start={node.contentStart} data-m-end={node.contentEnd}>
                   {node.content}
                 </code>
               </pre>
@@ -448,7 +412,6 @@ const App = () => {
           </div>
         ))}
 
-        {/* Слой визуальных рамок */}
         {overlayRects.map((r, i) => (
           <div
             key={i}

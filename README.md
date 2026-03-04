@@ -1,16 +1,40 @@
-# React + Vite
+# Markdown Selection Mapping Demo
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Интерактивная демка: выделение текста/компонентов в React‑превью слева мгновенно подсвечивает соответствующий диапазон символов в исходном markdown справа.
 
-Currently, two official plugins are available:
+## Как работает алгоритм
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+### 1. Единая строка markdown + карта блоков
 
-## React Compiler
+Весь документ — одна строка `MOCK_MARKDOWN`. Параллельно строится массив `MOCK_DATA`, где каждый блок хранит:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- `start` / `end` — глобальные индексы **всего** markdown‑фрагмента блока;
+- `contentStart` / `contentEnd` — индексы **видимого текста** внутри этого фрагмента (тело кода без ` ```js `, подпись галереи без HTML‑комментариев и т.д.).
 
-## Expanding the ESLint configuration
+### 2. Двухуровневая разметка DOM
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Каждый визуальный блок и каждый текстовый элемент внутри него получают `data-m-start` / `data-m-end`:
+
+- **Блок** (внешний `div`) — полный диапазон markdown‑фрагмента.
+- **Текстовый элемент** (`<p>`, `<code>`, `.gallery-label`) — диапазон только видимого текста.
+
+Благодаря этому алгоритм **не зависит от типа блока**: любой новый компонент достаточно аннотировать `data-m-start` / `data-m-end` на его текстовом элементе.
+
+### 3. Маппинг выделения → индексы markdown
+
+На событие `selectionchange`:
+
+1. Находим все блоки (`[data-m-block]`), пересекающие выделение.
+2. Для каждого блока ищем **ближайший аннотированный элемент** (`findInnerAnnotated`) от `range.startContainer` / `range.endContainer` вверх по DOM.
+3. Если нашли внутренний элемент — берём его `data-m-start` + считаем символьное смещение внутри (`getOffsetInBlock` через `TreeWalker`).
+4. Если не нашли (например, клик по картинке) — фолбэк на полный диапазон блока.
+
+Одна и та же логика работает для текста, кода, галереи и любого будущего типа блока.
+
+### 4. Подсветка markdown
+
+Полученные диапазоны `[start, end)` «разрезают» строку `MOCK_MARKDOWN` на обычные и подсвеченные `<span>`‑ы. При ховере над блоком слева его markdown‑фрагмент дополнительно оборачивается в рамку.
+
+## Расширение
+
+Для реального проекта `data-m-start` / `data-m-end` можно генерировать автоматически из AST markdown‑парсера (remark, markdown-it), который хранит `position.start.offset` / `position.end.offset` для каждого узла.
